@@ -1,0 +1,9 @@
+# 프로젝트 의존성 패키지 목록
+# 사용 예시: pip install -r requirements.txt
+
+requests>=2.31.0
+python-dotenv>=1.0.0
+ragas>=0.1.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+
