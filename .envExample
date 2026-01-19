@@ -3,7 +3,7 @@
 # 예시: cp .envExample .env
 
 # Langflow API URL
-LANGFLOW_URL=http://10.1.1.70:7860/api/v1/run/2e7c99e7-540d-468b-8d30-9540a03b2e04?stream=true
+LANGFLOW_URL=Langflow API URL
 
 # Langflow API Key (x-api-key 헤더에 사용됨)
 LANGFLOW_API_KEY=your_openai_api_key_here
