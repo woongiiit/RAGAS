@@ -151,6 +151,7 @@ def run_ragas_evaluation(dataset: Dataset) -> Dict:
     llm = llm_factory("gpt-4o-mini", client=openai_client)
     
     # Embeddings 인스턴스 생성 (OpenAIEmbeddings 직접 사용)
+    # answer_relevancy 메트릭에서 사용 (가능한 경우)
     embeddings = OpenAIEmbeddings(
         client=openai_client,
         model="text-embedding-ada-002"
@@ -158,14 +159,26 @@ def run_ragas_evaluation(dataset: Dataset) -> Dict:
     
     # 평가 메트릭 정의
     # ragas.metrics에서 import한 것은 인스턴스이므로 클래스를 사용하여 새 인스턴스 생성
-    # answer_relevancy는 embeddings 인터페이스 호환성 문제로 인해 embeddings 없이 사용
-    # (embeddings가 없어도 llm만으로 평가 가능하지만 정확도가 낮을 수 있음)
-    metrics = [
-        faithfulness.__class__(llm=llm),
-        answer_relevancy.__class__(llm=llm),  # embeddings 제거 - 인터페이스 호환성 문제
-        context_precision.__class__(llm=llm),
-        context_recall.__class__(llm=llm),
-    ]
+    try:
+        # answer_relevancy에 embeddings 주입 시도
+        # 일부 버전에서는 embeddings 파라미터를 지원하지 않을 수 있음
+        metrics = [
+            faithfulness.__class__(llm=llm),
+            answer_relevancy.__class__(llm=llm, embeddings=embeddings),
+            context_precision.__class__(llm=llm),
+            context_recall.__class__(llm=llm),
+        ]
+    except (TypeError, ValueError):
+        # embeddings 파라미터를 지원하지 않는 경우 llm만 사용
+        # (embeddings가 없어도 llm만으로 평가 가능하지만 정확도가 낮을 수 있음)
+        metrics = [
+            faithfulness.__class__(llm=llm),
+            answer_relevancy.__class__(llm=llm),
+            context_precision.__class__(llm=llm),
+            context_recall.__class__(llm=llm),
+        ]
+        # embeddings를 사용하지 않으므로 생성 코드는 유지하되 사용하지 않음
+        # (향후 다른 메트릭에서 사용 가능하거나 디버깅 용도)
     
     # 평가 실행
     result = evaluate(
@@ -191,9 +204,9 @@ def save_evaluation_results(
     ragas_data: List[Dict],
     parsed_response: Dict,
     output_dir: str = "results"
-) -> tuple:
+) -> str:
     """
-    평가 결과를 JSON과 JPG 이미지로 저장합니다.
+    평가 결과를 JSON 파일로 저장합니다.
 
     Args:
         results (Dict): 평가 결과
@@ -202,7 +215,7 @@ def save_evaluation_results(
         output_dir (str): 저장 디렉토리
 
     Returns:
-        tuple: (JSON 파일 경로, JPG 파일 경로)
+        str: JSON 파일 경로
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -230,13 +243,7 @@ def save_evaluation_results(
     
     print(f"\n평가 결과가 저장되었습니다: {json_filepath}")
     
-    # JPG 이미지 저장
-    jpg_filepath = output_dir / f"ragas_results_{timestamp}.jpg"
-    create_evaluation_visualization(results, jpg_filepath)
-    
-    print(f"평가 시각화가 저장되었습니다: {jpg_filepath}")
-    
-    return str(json_filepath), str(jpg_filepath)
+    return str(json_filepath)
 
 
 def create_evaluation_visualization(results: Dict, filepath: Path):
@@ -269,7 +276,7 @@ def create_evaluation_visualization(results: Dict, filepath: Path):
     # 값 표시
     for bar, score in zip(bars, scores):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
+        ax.text(bar.get_x() + bar.get_width()/2, height,
                 f'{score:.3f}',
                 ha='center', va='bottom', fontsize=10, fontweight='bold')
     

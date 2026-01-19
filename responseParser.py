@@ -104,39 +104,40 @@ def parse_response(response_data: dict) -> Dict[str, Optional[str]]:
                     elif 'text' in message:
                         answer = message['text']
 
-        # Context 추출: content_blocks에서 첫 번째 tool_use의 output
+        # Context 추출: content_blocks에서 type이 'json'인 항목들의 data.text 수집
         if 'outputs' in response and len(response['outputs']) > 0:
             first_output = response['outputs'][0]
             if 'outputs' in first_output and len(first_output['outputs']) > 0:
                 second_output = first_output['outputs'][0]
                 if 'results' in second_output and 'message' in second_output['results']:
                     message = second_output['results']['message']
-                    if 'data' in message and 'content_blocks' in message['data']:
+                    
+                    # content_blocks는 message.content_blocks 또는 message.data.content_blocks에 있을 수 있음
+                    content_blocks = None
+                    if 'content_blocks' in message:
+                        content_blocks = message['content_blocks']
+                    elif 'data' in message and 'content_blocks' in message['data']:
                         content_blocks = message['data']['content_blocks']
-                        if len(content_blocks) > 0:
-                            contents = content_blocks[0].get('contents', [])
-                            # 첫 번째 tool_use 타입 찾기
-                            for content in contents:
-                                if content.get('type') == 'tool_use' and 'output' in content:
-                                    output = content['output']
-                                    context_raw = None
-                                    
-                                    # structuredContent.result 우선, 없으면 content[0].text
-                                    if 'structuredContent' in output and 'result' in output['structuredContent']:
-                                        context_raw = output['structuredContent']['result']
-                                    elif 'content' in output and len(output['content']) > 0:
-                                        if 'text' in output['content'][0]:
-                                            context_raw = output['content'][0]['text']
-                                    
-                                    # chromaResult에서 content만 추출
-                                    if context_raw:
-                                        try:
-                                            context = _extract_content_from_chroma_result(context_raw)
-                                        except Exception as e:
-                                            print(f"Context 추출 중 오류: {e}")
-                                            context = context_raw
-                                    
-                                    break
+                    
+                    if content_blocks and len(content_blocks) > 0:
+                        # 모든 content_blocks를 순회하며 type이 'json'인 항목의 data.text 수집
+                        text_contents = []
+                        for content_block in content_blocks:
+                            if 'contents' in content_block:
+                                for content in content_block['contents']:
+                                    if content.get('type') == 'json' and 'data' in content:
+                                        data = content['data']
+                                        if 'text' in data and data['text']:
+                                            raw_text = data['text']
+                                            # chromaResult 구조에서 content만 추출하여 정제
+                                            extracted_content = _extract_content_from_chroma_result(raw_text)
+                                            text_contents.append(extracted_content)
+                        
+                        # 수집한 text들을 줄바꿈으로 구분하여 합침
+                        # 빈 문자열은 제외
+                        text_contents = [tc for tc in text_contents if tc and tc.strip()]
+                        if text_contents:
+                            context = '\n\n'.join(text_contents)
 
     except (KeyError, IndexError, TypeError) as e:
         print(f"응답 파싱 중 오류 발생: {e}")
@@ -195,10 +196,10 @@ def save_parsed_response(parsed_data: dict, filepath: str = None) -> str:
     # 저장 디렉토리 경로 설정
     save_dir = Path('data/parsed_responses')
 
-    # 파일명이 지정되지 않으면 타임스탬프 기반으로 생성
+    # 파일명이 지정되지 않으면 타임스탬프 + UUID 기반으로 생성
     if filepath is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        filename = f"parsed_{timestamp}.json"
+        filename = f"parsed_{timestamp}_{uuid.uuid4().hex[:8]}.json"
         filepath = save_dir / filename
     else:
         filepath = Path(filepath)

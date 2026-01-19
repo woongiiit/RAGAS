@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-01-15T17:05:41.095304",
+  "url": "http://10.1.1.70:7860/api/v1/run/da37679a-32c8-4fd4-a650-3b98e155ccf8?stream=true",
+  "payload": {
+    "input_value": "감사자료 제출요구 등에 대해서 어떤 내용을 규정하고 있나요?",
+    "output_type": "chat",
+    "input_type": "chat"
+  },
+  "status_code": null,
+  "is_error": true,
+  "response": {
+    "error": "HTTPConnectionPool(host='10.1.1.70', port=7860): Read timed out.",
+    "error_type": "ConnectionError"
+  }
+}

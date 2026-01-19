@@ -3,10 +3,12 @@ askToLangflow 모듈
 URL로 POST 요청을 보내고 응답을 저장하는 기능을 제공합니다.
 """
 
+import codecs
 import json
 import os
 import re
 import sys
+import uuid
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -44,10 +46,18 @@ def decode_unicode_escape(obj):
     elif isinstance(obj, str):
         # 유니코드 이스케이프 시퀀스(\uXXXX)를 실제 문자로 변환
         try:
-            # JSON 문자열로 감싸서 파싱하면 유니코드 이스케이프가 자동으로 디코딩됨
-            return json.loads(f'"{obj}"')
-        except (json.JSONDecodeError, ValueError):
-            # 파싱 실패 시 원본 반환
+            # 유니코드 이스케이프가 있는 경우에만 디코딩 시도
+            if '\\u' in obj or '\\U' in obj:
+                # codecs.decode를 사용하여 안전하게 디코딩
+                # 문자열을 bytes로 인코딩 후 unicode_escape로 디코딩
+                # latin1은 모든 바이트 값을 그대로 유지하는 인코딩이므로 안전하게 사용 가능
+                decoded = obj.encode('latin1').decode('unicode_escape')
+                return decoded
+            else:
+                # 유니코드 이스케이프가 없으면 원본 반환
+                return obj
+        except (UnicodeDecodeError, UnicodeEncodeError, ValueError, AttributeError):
+            # 디코딩 실패 시 원본 반환
             return obj
     else:
         return obj
@@ -105,7 +115,7 @@ def parse_streaming_response(text: str) -> dict:
         return {'text': text}
 
 
-def ask_to_langflow(payload: dict, url: str = None, headers: dict = None) -> dict:
+def ask_to_langflow(payload: dict, url: str = None, headers: dict = None, return_filepath: bool = False) -> dict:
     """
     지정된 URL로 POST 요청을 보내고 응답을 저장합니다.
     
@@ -113,9 +123,10 @@ def ask_to_langflow(payload: dict, url: str = None, headers: dict = None) -> dic
         payload (dict): POST 요청에 포함할 데이터
         url (str, optional): POST 요청을 보낼 URL. 기본값은 None (환경변수 LANGFLOW_URL에서 가져옴)
         headers (dict, optional): 요청 헤더. 기본값은 None (Content-Type: application/json 사용)
+        return_filepath (bool): 저장된 파일 경로를 반환할지 여부. 기본값은 False
     
     Returns:
-        dict: 서버로부터 받은 응답 데이터
+        dict 또는 tuple: return_filepath가 True면 (response_data, filepath), False면 response_data만 반환
     
     Raises:
         ValueError: URL이 제공되지 않고 환경변수에도 없을 때
@@ -140,7 +151,8 @@ def ask_to_langflow(payload: dict, url: str = None, headers: dict = None) -> dic
     
     # POST 요청 전송
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        # timeout 설정 (연결 10초, 읽기 60초)
+        response = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
         response.raise_for_status()  # HTTP 오류 발생 시 예외 발생
         
         # 응답 데이터 추출 및 한국어 디코딩
@@ -158,8 +170,10 @@ def ask_to_langflow(payload: dict, url: str = None, headers: dict = None) -> dic
             response_data = parse_streaming_response(response.text)
         
         # 응답 저장
-        save_response(url, payload, response_data, response.status_code)
+        saved_filepath = save_response(url, payload, response_data, response.status_code)
         
+        if return_filepath:
+            return response_data, saved_filepath
         return response_data
     
     except requests.exceptions.RequestException as e:
@@ -168,7 +182,9 @@ def ask_to_langflow(payload: dict, url: str = None, headers: dict = None) -> dic
             'error': str(e),
             'error_type': type(e).__name__
         }
-        save_response(url, payload, error_data, status_code=None, is_error=True)
+        saved_filepath = save_response(url, payload, error_data, status_code=None, is_error=True)
+        if return_filepath:
+            raise  # 오류 시에는 filepath를 반환하지 않고 예외만 발생
         raise
 
 
@@ -186,16 +202,19 @@ def save_payload(payload: dict, filename: str = None) -> str:
     # 저장 디렉토리 경로 설정
     save_dir = Path('data/payloads')
     
-    # 파일명이 지정되지 않으면 타임스탬프 기반으로 생성
+    # 파일명이 지정되지 않으면 타임스탬프 + UUID 기반으로 생성
     if filename is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        filename = f"payload_{timestamp}.json"
+        filename = f"payload_{timestamp}_{uuid.uuid4().hex[:8]}.json"
     
     # .json 확장자가 없으면 추가
     if not filename.endswith('.json'):
         filename += '.json'
     
     filepath = save_dir / filename
+    
+    # 디렉토리가 없으면 생성
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     
     # JSON 파일로 저장
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -233,7 +252,7 @@ def load_payload(filepath: str) -> dict:
     return payload
 
 
-def save_response(url: str, payload: dict, response_data: dict, status_code: int = None, is_error: bool = False):
+def save_response(url: str, payload: dict, response_data: dict, status_code: int = None, is_error: bool = False) -> str:
     """
     응답 데이터를 파일로 저장합니다.
     
@@ -243,14 +262,20 @@ def save_response(url: str, payload: dict, response_data: dict, status_code: int
         response_data (dict): 받은 응답 데이터
         status_code (int, optional): HTTP 상태 코드
         is_error (bool): 오류 발생 여부
+    
+    Returns:
+        str: 저장된 파일 경로
     """
     # 저장 디렉토리 경로 설정
     save_dir = Path('data/responses')
     
-    # 파일명 생성 (타임스탬프 기반)
+    # 파일명 생성 (타임스탬프 + UUID 기반)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    filename = f"response_{timestamp}.json"
+    filename = f"response_{timestamp}_{uuid.uuid4().hex[:8]}.json"
     filepath = save_dir / filename
+    
+    # 디렉토리가 없으면 생성
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     
     # 저장할 데이터 구성
     save_data = {
@@ -267,6 +292,7 @@ def save_response(url: str, payload: dict, response_data: dict, status_code: int
         json.dump(save_data, f, ensure_ascii=False, indent=2)
     
     print(f"응답이 저장되었습니다: {filepath}")
+    return str(filepath)
 
 
 if __name__ == '__main__':
