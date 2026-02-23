@@ -98,13 +98,51 @@ def parse_streaming_response(text: str) -> dict:
     # 파싱된 이벤트들을 구조화
     if parsed_events:
         # 마지막 'end' 이벤트에서 최종 결과 추출
+        final_result = None
         for event in reversed(parsed_events):
             if isinstance(event, dict) and event.get('event') == 'end':
                 result = event.get('data', {}).get('result', {})
                 if result:
-                    return decode_unicode_escape(result)
+                    final_result = decode_unicode_escape(result)
+                    break
         
-        # 'end' 이벤트가 없으면 모든 이벤트 반환
+        # 'end' 이벤트에서 result를 찾았으면 반환
+        if final_result:
+            return final_result
+        
+        # 'end' 이벤트가 없거나 result가 없으면, 모든 이벤트에서 outputs 구조 찾기
+        # 'add_message' 이벤트들을 수집하여 outputs 구조 생성
+        all_outputs = []
+        for event in parsed_events:
+            if isinstance(event, dict):
+                event_type = event.get('event', '')
+                event_data = event.get('data', {})
+                
+                # 'add_message' 이벤트에서 메시지 추출
+                if event_type == 'add_message' and event_data:
+                    # outputs 구조로 변환
+                    message_output = {
+                        'outputs': [{
+                            'results': {
+                                'message': event_data
+                            }
+                        }]
+                    }
+                    all_outputs.append(message_output)
+                
+                # 'end' 이벤트의 result에서 outputs 추출
+                elif event_type == 'end' and 'result' in event_data:
+                    result = event_data.get('result', {})
+                    if isinstance(result, dict) and 'outputs' in result:
+                        all_outputs.append(result)
+        
+        # outputs를 찾았으면 반환
+        if all_outputs:
+            return {
+                'outputs': all_outputs
+            }
+        
+        # 모든 이벤트 반환
         return {'events': parsed_events, 'text': text}
     
     # 파싱 실패 시 원본 텍스트 반환 (유니코드 디코딩 시도)
@@ -151,13 +189,74 @@ def ask_to_langflow(payload: dict, url: str = None, headers: dict = None, return
     
     # POST 요청 전송
     try:
-        # timeout 설정 (연결 10초, 읽기 60초)
-        response = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
+        # timeout 설정 (연결 10초, 읽기 120초로 증가 - 배치 처리 시 더 긴 응답 시간 고려)
+        response = requests.post(url, json=payload, headers=headers, timeout=(10, 120), stream=True)
         response.raise_for_status()  # HTTP 오류 발생 시 예외 발생
         
-        # 응답 데이터 추출 및 한국어 디코딩
+        # 스트리밍 응답 처리
         content_type = response.headers.get('content-type', '')
-        if content_type.startswith('application/json'):
+        
+        # 스트리밍 응답인 경우 전체 응답을 수집
+        if 'text' in content_type or 'stream' in content_type or 'event-stream' in content_type:
+            # 스트리밍 응답을 전체 수신
+            full_text = ''
+            for chunk in response.iter_content(chunk_size=8192, decode_unicode=True):
+                if chunk:
+                    full_text += chunk
+            
+            # 스트리밍 응답 파싱
+            response_data = parse_streaming_response(full_text)
+            
+            # parse_streaming_response가 outputs 구조를 반환하지 않은 경우 처리
+            if 'outputs' not in response_data:
+                # events에서 최종 메시지 찾기
+                if 'events' in response_data:
+                    events = response_data.get('events', [])
+                    # 'end' 이벤트에서 result 추출 시도
+                    for event in reversed(events):
+                        if isinstance(event, dict):
+                            event_type = event.get('event', '')
+                            event_data = event.get('data', {})
+                            
+                            # 'end' 이벤트에서 result 추출
+                            if event_type == 'end' and 'result' in event_data:
+                                result = event_data.get('result', {})
+                                if result and isinstance(result, dict):
+                                    if 'outputs' in result:
+                                        response_data = result
+                                        break
+                                    else:
+                                        # result에 outputs가 없으면 outputs 구조로 변환
+                                        response_data = {
+                                            'outputs': [{
+                                                'outputs': [{
+                                                    'results': result
+                                                }]
+                                            }]
+                                        }
+                                        break
+                    
+                    # 여전히 outputs가 없으면 모든 add_message 이벤트에서 메시지 수집
+                    if 'outputs' not in response_data:
+                        all_messages = []
+                        for event in events:
+                            if isinstance(event, dict) and event.get('event') == 'add_message':
+                                event_data = event.get('data', {})
+                                if event_data:
+                                    all_messages.append(event_data)
+                        
+                        if all_messages:
+                            # 모든 메시지를 outputs 구조로 변환
+                            response_data = {
+                                'outputs': [{
+                                    'outputs': [{
+                                        'results': {
+                                            'message': msg
+                                        }
+                                    } for msg in all_messages]
+                                }]
+                            }
+        elif content_type.startswith('application/json'):
             try:
                 response_data = response.json()
                 # 유니코드 이스케이프 디코딩
@@ -291,7 +390,13 @@ def save_response(url: str, payload: dict, response_data: dict, status_code: int
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(save_data, f, ensure_ascii=False, indent=2)
     
-    print(f"응답이 저장되었습니다: {filepath}")
+    # 스레드 안전한 로깅 (Streamlit 컨텍스트 없이도 작동)
+    try:
+        print(f"응답이 저장되었습니다: {filepath}")
+    except Exception:
+        # Streamlit 컨텍스트가 없는 경우 무시 (스레드 내에서 실행될 수 있음)
+        pass
+    
     return str(filepath)
 
 

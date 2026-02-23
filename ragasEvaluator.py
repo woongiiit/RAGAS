@@ -147,8 +147,21 @@ def run_ragas_evaluation(dataset: Dataset) -> Dict:
     # OpenAI 클라이언트 생성
     openai_client = OpenAI(api_key=api_key)
     
-    # LLM 인스턴스 생성 (llm_factory 사용)
-    llm = llm_factory("gpt-4o-mini", client=openai_client)
+    # LLM 인스턴스 생성 (max_tokens를 명시적으로 설정)
+    # llm_factory에 max_tokens를 직접 전달하거나, 생성 후 model_args에 설정
+    llm = llm_factory("gpt-4o-mini", client=openai_client, max_tokens=4096)
+    
+    # max_tokens를 4096으로 명시적으로 설정 (model_args에 직접 설정)
+    if hasattr(llm, 'model_args') and isinstance(llm.model_args, dict):
+        llm.model_args['max_tokens'] = 4096
+        print(f"✅ max_tokens를 4096으로 명시적으로 설정했습니다 (model_args: {llm.model_args.get('max_tokens')})")
+    else:
+        # model_args가 없는 경우 대비
+        try:
+            setattr(llm, 'max_tokens', 4096)
+            print("✅ max_tokens를 4096으로 설정했습니다 (동적 속성)")
+        except Exception as e:
+            print(f"⚠️ 경고: max_tokens를 4096으로 설정할 수 없습니다. (오류: {e})")
     
     # Embeddings 인스턴스 생성 (OpenAIEmbeddings 직접 사용)
     # answer_relevancy 메트릭에서 사용 (가능한 경우)

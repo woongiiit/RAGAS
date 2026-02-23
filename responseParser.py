@@ -3,12 +3,13 @@ responseParser 모듈
 Langflow 응답에서 실제 답변과 참고한 context를 추출하는 기능을 제공합니다.
 """
 
-import ast
 import json
 import re
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 # Windows 콘솔에서 UTF-8 출력 지원
 if sys.platform == 'win32':
@@ -104,40 +105,46 @@ def parse_response(response_data: dict) -> Dict[str, Optional[str]]:
                     elif 'text' in message:
                         answer = message['text']
 
-        # Context 추출: content_blocks에서 type이 'json'인 항목들의 data.text 수집
+        # Context 추출: 모든 outputs를 순회하여 content_blocks에서 type이 'json'인 항목들의 data.text 수집
+        text_contents = []  # 모든 outputs에서 수집한 context를 저장
+        
         if 'outputs' in response and len(response['outputs']) > 0:
-            first_output = response['outputs'][0]
-            if 'outputs' in first_output and len(first_output['outputs']) > 0:
-                second_output = first_output['outputs'][0]
-                if 'results' in second_output and 'message' in second_output['results']:
-                    message = second_output['results']['message']
-                    
-                    # content_blocks는 message.content_blocks 또는 message.data.content_blocks에 있을 수 있음
-                    content_blocks = None
-                    if 'content_blocks' in message:
-                        content_blocks = message['content_blocks']
-                    elif 'data' in message and 'content_blocks' in message['data']:
-                        content_blocks = message['data']['content_blocks']
-                    
-                    if content_blocks and len(content_blocks) > 0:
-                        # 모든 content_blocks를 순회하며 type이 'json'인 항목의 data.text 수집
-                        text_contents = []
-                        for content_block in content_blocks:
-                            if 'contents' in content_block:
-                                for content in content_block['contents']:
-                                    if content.get('type') == 'json' and 'data' in content:
-                                        data = content['data']
-                                        if 'text' in data and data['text']:
-                                            raw_text = data['text']
-                                            # chromaResult 구조에서 content만 추출하여 정제
-                                            extracted_content = _extract_content_from_chroma_result(raw_text)
-                                            text_contents.append(extracted_content)
-                        
-                        # 수집한 text들을 줄바꿈으로 구분하여 합침
-                        # 빈 문자열은 제외
-                        text_contents = [tc for tc in text_contents if tc and tc.strip()]
-                        if text_contents:
-                            context = '\n\n'.join(text_contents)
+            # 모든 outputs를 순회
+            for first_output in response['outputs']:
+                if 'outputs' in first_output and len(first_output['outputs']) > 0:
+                    # 각 first_output의 모든 second_outputs를 순회
+                    for second_output in first_output['outputs']:
+                        if 'results' in second_output and 'message' in second_output['results']:
+                            message = second_output['results']['message']
+                            
+                            # content_blocks는 message.content_blocks 또는 message.data.content_blocks에 있을 수 있음
+                            content_blocks = None
+                            if 'content_blocks' in message:
+                                content_blocks = message['content_blocks']
+                            elif 'data' in message and 'content_blocks' in message['data']:
+                                content_blocks = message['data']['content_blocks']
+                            
+                            if content_blocks and len(content_blocks) > 0:
+                                # 모든 content_blocks를 순회하며 type이 'json'인 항목의 data.text 수집
+                                for content_block in content_blocks:
+                                    if 'contents' in content_block:
+                                        for content in content_block['contents']:
+                                            if content.get('type') == 'json' and 'data' in content:
+                                                data = content['data']
+                                                # text가 있고 비어있지 않은 경우만 수집
+                                                if 'text' in data and data['text'] and data['text'].strip():
+                                                    raw_text = data['text']
+                                                    # chromaResult 구조에서 content만 추출하여 정제
+                                                    extracted_content = _extract_content_from_chroma_result(raw_text)
+                                                    # 중복 제거를 위해 이미 수집된 내용인지 확인
+                                                    if extracted_content and extracted_content.strip() and extracted_content not in text_contents:
+                                                        text_contents.append(extracted_content)
+        
+        # 수집한 text들을 줄바꿈으로 구분하여 합침
+        # 빈 문자열은 제외
+        text_contents = [tc for tc in text_contents if tc and tc.strip()]
+        if text_contents:
+            context = '\n\n'.join(text_contents)
 
     except (KeyError, IndexError, TypeError) as e:
         print(f"응답 파싱 중 오류 발생: {e}")
@@ -191,8 +198,6 @@ def save_parsed_response(parsed_data: dict, filepath: str = None) -> str:
     Returns:
         str: 저장된 파일 경로
     """
-    from datetime import datetime
-
     # 저장 디렉토리 경로 설정
     save_dir = Path('data/parsed_responses')
 
@@ -213,7 +218,13 @@ def save_parsed_response(parsed_data: dict, filepath: str = None) -> str:
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(parsed_data, f, ensure_ascii=False, indent=2)
 
-    print(f"파싱된 응답이 저장되었습니다: {filepath}")
+    # 스레드 안전한 로깅 (Streamlit 컨텍스트 없이도 작동)
+    try:
+        print(f"파싱된 응답이 저장되었습니다: {filepath}")
+    except Exception:
+        # Streamlit 컨텍스트가 없는 경우 무시 (스레드 내에서 실행될 수 있음)
+        pass
+
     return str(filepath)
 
 
